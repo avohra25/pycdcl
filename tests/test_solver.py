@@ -1,7 +1,7 @@
 import random
 import unittest
 
-from pycdcl import Solver, check_model, solve
+from pycdcl import Solver, check_model, luby, solve
 
 from helpers import brute_force_sat, pigeonhole_clauses, random_3sat, random_cnf
 
@@ -46,6 +46,10 @@ class BasicTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Solver().add_clause([1, 0])
 
+    def test_luby(self):
+        self.assertEqual([luby(2, i) for i in range(15)],
+                         [1, 1, 2, 1, 1, 2, 4, 1, 1, 2, 1, 1, 2, 4, 8])
+
 
 class AgainstBruteForce(unittest.TestCase):
     def test_random_small_formulas(self):
@@ -53,7 +57,7 @@ class AgainstBruteForce(unittest.TestCase):
         for _ in range(600):
             n = rng.randint(1, 10)
             clauses = random_cnf(rng, n, rng.randint(1, 45), width=4)
-            s = Solver()
+            s = Solver(restart_first=rng.choice((1, 4, 100)))
             s.add_clauses(clauses)
             result = s.solve()
             self.assertEqual(result, brute_force_sat(n, clauses), clauses)
@@ -65,7 +69,7 @@ class AgainstBruteForce(unittest.TestCase):
         for _ in range(250):
             n = rng.randint(2, 9)
             clauses = random_cnf(rng, n, rng.randint(1, 30))
-            s = Solver()
+            s = Solver(restart_first=2)
             s.add_clauses(clauses)
             for _ in range(4):
                 assumptions = sorted({rng.choice((1, -1)) * rng.randint(1, n)

@@ -7,7 +7,8 @@ negation is ``lit ^ 1`` and the variable is ``lit >> 1``.
 
 Techniques: two watched literals, first-UIP clause learning with
 local (one-step) learnt clause minimisation, non-chronological
-backjumping, VSIDS branching with an indexed heap and phase saving.
+backjumping, VSIDS branching with an indexed heap, phase saving, Luby
+restarts and activity-based learnt clause deletion.
 """
 
 from __future__ import annotations
@@ -17,6 +18,19 @@ from typing import Iterable, Sequence
 from ._heap import VarHeap
 
 TRUE, FALSE, UNASSIGNED = 1, -1, 0
+
+
+def luby(y: float, i: int) -> float:
+    """Return the i-th element (0-based) of the Luby sequence scaled by y."""
+    size, seq = 1, 0
+    while size < i + 1:
+        seq += 1
+        size = 2 * size + 1
+    while size - 1 != i:
+        size = (size - 1) >> 1
+        seq -= 1
+        i %= size
+    return y ** seq
 
 
 class Clause:
@@ -44,8 +58,8 @@ def _to_internal(lit: int) -> int:
 
 
 class Stats:
-    __slots__ = ("decisions", "propagations", "conflicts",
-                 "learnt_literals", "minimised_literals")
+    __slots__ = ("decisions", "propagations", "conflicts", "restarts",
+                 "learnt_literals", "minimised_literals", "reductions")
 
     def __init__(self) -> None:
         for name in self.__slots__:
@@ -71,9 +85,18 @@ class Solver:
     False
     """
 
-    def __init__(self, *, var_decay: float = 0.95, clause_decay: float = 0.999) -> None:
+    def __init__(self, *, var_decay: float = 0.95, clause_decay: float = 0.999,
+                 restart_first: int = 100, restart_inc: float = 2.0,
+                 learnt_ratio: float = 1 / 3, learnt_growth: float = 1.1,
+                 min_learnts: int = 100) -> None:
         self.var_decay = var_decay
         self.clause_decay = clause_decay
+        self.restart_first = restart_first
+        self.restart_inc = restart_inc
+        self.learnt_ratio = learnt_ratio
+        self.learnt_growth = learnt_growth
+        self.min_learnts = min_learnts
+
         self.num_vars = 0
         self.clauses: list[Clause] = []
         self.learnts: list[Clause] = []
@@ -90,6 +113,7 @@ class Solver:
         self.qhead = 0
         self.var_inc = 1.0
         self.cla_inc = 1.0
+        self.max_learnts = 0.0
         self.ok = True
         self.model: list[int] | None = None
         self.stats = Stats()
@@ -339,12 +363,35 @@ class Solver:
                 return (v << 1) | polarity[v]
         return -1
 
-    def _search(self, assumptions: Sequence[int]) -> bool:
+    def _locked(self, c: Clause) -> bool:
+        first = c.lits[0]
+        return self.vals[first] == TRUE and self.reason[first >> 1] is c
+
+    def _reduce_db(self) -> None:
+        """Delete roughly half of the learnt clauses, least active first."""
+        self.stats.reductions += 1
+        learnts = sorted(self.learnts, key=lambda c: (len(c.lits) > 2, c.activity))
+        limit = self.cla_inc / max(len(learnts), 1)
+        half = len(learnts) // 2
+        keep = []
+        for i, c in enumerate(learnts):
+            if len(c.lits) > 2 and not self._locked(c) and (i < half or c.activity < limit):
+                c.deleted = True
+            else:
+                keep.append(c)
+        self.learnts = keep
+        for ws in self.watches:
+            if ws:
+                ws[:] = [c for c in ws if not c.deleted]
+
+    def _search(self, budget: float, assumptions: Sequence[int]) -> bool | None:
         stats = self.stats
+        conflicts = 0
         while True:
             confl = self._propagate()
             if confl is not None:
                 stats.conflicts += 1
+                conflicts += 1
                 if not self.trail_lim:
                     self.ok = False
                     return False
@@ -362,6 +409,12 @@ class Solver:
                 self.var_inc /= self.var_decay
                 self.cla_inc /= self.clause_decay
                 continue
+
+            if conflicts >= budget:
+                self._cancel_until(0)
+                return None
+            if len(self.learnts) - len(self.trail) >= self.max_learnts:
+                self._reduce_db()
 
             nxt = -1
             while len(self.trail_lim) < len(assumptions):
@@ -387,19 +440,36 @@ class Solver:
 
     # ----------------------------------------------------------------- solve
 
-    def solve(self, assumptions: Iterable[int] = ()) -> bool:
+    def solve(self, assumptions: Iterable[int] = (),
+              max_conflicts: int | None = None) -> bool | None:
         """Decide satisfiability, optionally under assumption literals.
 
-        Returns True (model in ``self.model``) or False. Unsatisfiability
-        under assumptions does not poison the solver; later calls can drop
-        them.
+        Returns True (model in ``self.model``), False, or None if
+        ``max_conflicts`` was exhausted first. Unsatisfiability under
+        assumptions does not poison the solver; later calls can drop them.
         """
         assumptions = list(assumptions)
         self._ensure_vars(assumptions)
         self.model = None
         if not self.ok:
             return False
-        status = self._search([_to_internal(l) for l in assumptions])
+        assumps = [_to_internal(l) for l in assumptions]
+        self.max_learnts = max(len(self.clauses) * self.learnt_ratio, float(self.min_learnts))
+        start = self.stats.conflicts
+        status = None
+        restarts = 0
+        while status is None:
+            budget = luby(self.restart_inc, restarts) * self.restart_first
+            if max_conflicts is not None:
+                remaining = max_conflicts - (self.stats.conflicts - start)
+                if remaining <= 0:
+                    break
+                budget = min(budget, remaining)
+            status = self._search(budget, assumps)
+            if status is None:
+                restarts += 1
+                self.stats.restarts += 1
+                self.max_learnts *= self.learnt_growth
         self._cancel_until(0)
         return status
 
