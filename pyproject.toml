@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pycdcl"
+version = "0.1.0"
+description = "A small, readable CDCL SAT solver in pure Python"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "avohra25" }]
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+[tool.setuptools]
+packages = ["pycdcl"]
