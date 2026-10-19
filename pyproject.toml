@@ -16,5 +16,8 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
 ]
 
+[project.scripts]
+pycdcl = "pycdcl.cli:main"
+
 [tool.setuptools]
 packages = ["pycdcl"]
