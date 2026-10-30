@@ -31,6 +31,9 @@ s UNSATISFIABLE
   "locked" reason clauses are always kept).
 - **Incremental solving**: add clauses between calls and solve under
   **assumptions** without losing learnt clauses.
+- **Unsatisfiable cores over assumptions**: after a failed solve,
+  `Solver.core` names the assumptions that are jointly to blame, found by
+  final conflict analysis.
 - **Conflict budgets** (`max_conflicts`) that return "unknown" instead of
   running forever.
 - **Encoders**: at-most-one, at-most/at-least/exactly-k (Sinz sequential
@@ -63,6 +66,10 @@ s.value(3)                      # True
 s.solve(assumptions=[-3])       # False: unsatisfiable under the assumption
 s.solve()                       # True again; assumptions don't stick
 
+s.solve(assumptions=[4, 1, -3]) # False
+s.core                          # [-3, 1]: 1 forces 2, which forces 3
+s.failed(4)                     # False: assumption 4 played no part
+
 s.add_clause([-3])              # incremental: learnt clauses are kept
 s.solve()                       # False
 ```
@@ -86,7 +93,7 @@ graph_coloring([(1, 2), (2, 3), (3, 1)], 2)   # None: a triangle needs 3 colours
 ## Command line
 
 ```
-pycdcl FILE.cnf [--stats] [-q] [--max-conflicts N]   # '-' reads stdin
+pycdcl FILE.cnf [--stats] [-q] [--max-conflicts N] [--assume LITS]   # '-' reads stdin
 pycdcl sudoku GRID                                    # 81 chars, '.' or '0' blank
 pycdcl queens N
 ```
@@ -94,6 +101,16 @@ pycdcl queens N
 Output follows the SAT competition format: an `s` status line, `v` model
 lines wrapped at 78 columns and ending in `0`, and `c` comment lines for
 statistics. Every model is checked against the input before it is printed.
+
+`--assume "1 -3"` solves under assumption literals. If that is
+unsatisfiable, a `c core ...` line lists the assumptions responsible (an
+empty `c core` means the formula is unsatisfiable without any of them):
+
+```
+$ python -m pycdcl --assume "1 3" examples/small.cnf
+s UNSATISFIABLE
+c core 1 3
+```
 
 ## How it works
 
@@ -125,7 +142,12 @@ reason for an assignment.
 
 **Assumptions** are decided first, one per decision level, before any
 heuristic decision. An assumption that is already false means unsatisfiable
-under those assumptions, but the formula itself is untouched.
+under those assumptions, but the formula itself is untouched. To say *which*
+assumptions were at fault, the solver walks the implication graph backwards
+from the falsified assumption, following reason clauses, and collects the
+assumption decisions it reaches (MiniSat's `analyzeFinal`). The result is a
+core: a subset of the assumptions that is already inconsistent with the
+formula. It is not guaranteed to be minimal.
 
 ## Benchmarks
 

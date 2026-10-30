@@ -37,6 +37,25 @@ class CliTests(unittest.TestCase):
         self.assertIn("s UNSATISFIABLE", out)
         self.assertIn("c conflicts", out)
 
+    def test_assume_prints_core(self):
+        path = self.write("p cnf 3 2\n-1 2 0\n-2 -3 0\n")
+        code, out = run(["--assume", "1,3", path])
+        self.assertEqual(code, 20)
+        self.assertEqual(out.splitlines(), ["s UNSATISFIABLE", "c core 1 3"])
+        code, out = run(["--assume", "1 -3", "-q", path])
+        self.assertEqual(code, 10)
+        self.assertEqual(out.splitlines(), ["s SATISFIABLE"])
+
+    def test_assume_on_unsat_formula_prints_empty_core(self):
+        code, out = run(["--assume", "1", self.write("p cnf 2 2\n2 0\n-2 0\n")])
+        self.assertEqual(code, 20)
+        self.assertEqual(out.splitlines(), ["s UNSATISFIABLE", "c core"])
+
+    def test_bad_assumption(self):
+        path = self.write("p cnf 1 1\n1 0\n")
+        self.assertEqual(run(["--assume", "1 x", path])[0], 1)
+        self.assertEqual(run(["--assume", "0", path])[0], 1)
+
     def test_unknown_on_budget(self):
         clauses = []
         var = lambda p, h: p * 7 + h + 1  # noqa: E731

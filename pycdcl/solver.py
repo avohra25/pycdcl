@@ -8,7 +8,9 @@ negation is ``lit ^ 1`` and the variable is ``lit >> 1``.
 Techniques: two watched literals, first-UIP clause learning with
 local (one-step) learnt clause minimisation, non-chronological
 backjumping, VSIDS branching with an indexed heap, phase saving, Luby
-restarts and activity-based learnt clause deletion.
+restarts and activity-based learnt clause deletion. When a solve fails
+under assumptions, final conflict analysis reports which assumptions were
+responsible (``Solver.core``).
 """
 
 from __future__ import annotations
@@ -116,6 +118,8 @@ class Solver:
         self.max_learnts = 0.0
         self.ok = True
         self.model: list[int] | None = None
+        self.core: list[int] | None = None
+        self._final_core: list[int] = []
         self.stats = Stats()
 
     # ------------------------------------------------------------------ setup
@@ -189,6 +193,10 @@ class Solver:
         if self.model is None or not 1 <= var <= len(self.model):
             return None
         return self.model[var - 1] > 0
+
+    def failed(self, lit: int) -> bool:
+        """True iff assumption ``lit`` is in the core of the last failed solve."""
+        return self.core is not None and lit in self.core
 
     # ------------------------------------------------------------ internals
 
@@ -355,6 +363,36 @@ class Solver:
         learnt[1], learnt[best] = learnt[best], learnt[1]
         return learnt, level[learnt[1] >> 1]
 
+    def _analyze_final(self, p: int) -> list[int]:
+        """Explain why assumption ``p`` (internal literal) is false.
+
+        Walks the implication graph back from ``p`` to the assumption
+        decisions that forced its negation. Returns internal literals: ``p``
+        itself plus every assumption it depends on. Only called while every
+        open decision level belongs to an assumption.
+        """
+        seen, level, reason, trail = self.seen, self.level, self.reason, self.trail
+        core = [p]
+        v0 = p >> 1
+        if level[v0] == 0:
+            return core   # the formula alone refutes p
+        seen[v0] = True
+        for idx in range(len(trail) - 1, self.trail_lim[0] - 1, -1):
+            lit = trail[idx]
+            v = lit >> 1
+            if not seen[v]:
+                continue
+            seen[v] = False
+            r = reason[v]
+            if r is None:
+                core.append(lit)  # an assumption decision (possibly ~p itself)
+            else:
+                for q in r.lits[1:]:
+                    if level[q >> 1] > 0:
+                        seen[q >> 1] = True
+        seen[v0] = False
+        return core
+
     def _pick_branch(self) -> int:
         order, vals, polarity = self.order, self.vals, self.polarity
         while len(order):
@@ -422,7 +460,9 @@ class Solver:
                 if self.vals[p] == TRUE:
                     self.trail_lim.append(len(self.trail))  # dummy level
                 elif self.vals[p] == FALSE:
-                    return False  # unsatisfiable under the assumptions
+                    # Unsatisfiable under the assumptions; record which ones.
+                    self._final_core = self._analyze_final(p)
+                    return False
                 else:
                     nxt = p
                     break
@@ -447,13 +487,29 @@ class Solver:
         Returns True (model in ``self.model``), False, or None if
         ``max_conflicts`` was exhausted first. Unsatisfiability under
         assumptions does not poison the solver; later calls can drop them.
+
+        After a False result, ``self.core`` lists the assumptions (as given,
+        in DIMACS form) that are jointly inconsistent with the formula. It is
+        empty when the formula is unsatisfiable without any assumptions, and
+        None after a True or None result.
+
+        >>> s = Solver()
+        >>> s.add_clauses([[-1, 2], [-2, -3]])
+        True
+        >>> s.solve(assumptions=[4, 1, 5, 3])
+        False
+        >>> sorted(s.core)
+        [1, 3]
         """
         assumptions = list(assumptions)
         self._ensure_vars(assumptions)
         self.model = None
+        self.core = None
         if not self.ok:
+            self.core = []
             return False
         assumps = [_to_internal(l) for l in assumptions]
+        self._final_core = []
         self.max_learnts = max(len(self.clauses) * self.learnt_ratio, float(self.min_learnts))
         start = self.stats.conflicts
         status = None
@@ -471,6 +527,10 @@ class Solver:
                 self.stats.restarts += 1
                 self.max_learnts *= self.learnt_growth
         self._cancel_until(0)
+        if status is False:
+            # A level-0 conflict leaves the empty core; otherwise map the
+            # internal literals back to the caller's spelling.
+            self.core = [] if not self.ok else [_to_dimacs(l) for l in self._final_core]
         return status
 
 

@@ -1,6 +1,7 @@
 """Command-line front end.
 
-    pycdcl FILE.cnf [--stats] [--max-conflicts N]   solve a DIMACS file ('-' = stdin)
+    pycdcl FILE.cnf [--stats] [--max-conflicts N] [--assume LITS]
+                                                     solve a DIMACS file ('-' = stdin)
     pycdcl sudoku GRID                               solve an 81-char sudoku
     pycdcl queens N                                  place N queens
 
@@ -33,7 +34,27 @@ def _format_model(model: list[int], width: int = 78) -> list[str]:
     return lines
 
 
+def _parse_assumptions(text: str | None) -> list[int]:
+    if not text:
+        return []
+    lits = []
+    for tok in text.replace(",", " ").split():
+        try:
+            lit = int(tok)
+        except ValueError:
+            raise ValueError(f"bad assumption literal {tok!r}") from None
+        if lit == 0:
+            raise ValueError("0 is not a literal")
+        lits.append(lit)
+    return lits
+
+
 def _solve_file(args: argparse.Namespace, out) -> int:
+    try:
+        assumptions = _parse_assumptions(args.assume)
+    except ValueError as exc:
+        print(f"c error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
     try:
         if args.file == "-":
             text = sys.stdin.read()
@@ -49,7 +70,7 @@ def _solve_file(args: argparse.Namespace, out) -> int:
     while s.num_vars < num_vars:
         s.new_var()
     s.add_clauses(clauses)
-    result = s.solve(max_conflicts=args.max_conflicts)
+    result = s.solve(assumptions, max_conflicts=args.max_conflicts)
     elapsed = time.perf_counter() - t0
     if args.stats:
         print(f"c vars {num_vars} clauses {len(clauses)} time {elapsed:.3f}s", file=out)
@@ -64,6 +85,10 @@ def _solve_file(args: argparse.Namespace, out) -> int:
         return EXIT_SAT
     if result is False:
         print("s UNSATISFIABLE", file=out)
+        if assumptions:
+            # An empty core means the formula is unsatisfiable on its own.
+            core = " ".join(map(str, sorted(s.core, key=abs)))
+            print(f"c core {core}".rstrip(), file=out)
         return EXIT_UNSAT
     print("s UNKNOWN", file=out)
     return EXIT_UNKNOWN
@@ -117,6 +142,9 @@ def main(argv: list[str] | None = None, out=None) -> int:
     p.add_argument("-q", "--quiet", action="store_true", help="omit the model ('v' lines)")
     p.add_argument("--max-conflicts", type=int, default=None, metavar="N",
                    help="give up (s UNKNOWN) after N conflicts")
+    p.add_argument("--assume", metavar="LITS", default=None,
+                   help="solve under assumption literals, e.g. '1 -3' or '1,-3'; "
+                        "on UNSAT prints the failed ones as 'c core ...'")
     p.add_argument("--version", action="version", version=f"pycdcl {__version__}")
     return _solve_file(p.parse_args(argv), out)
 
