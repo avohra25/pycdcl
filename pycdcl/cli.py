@@ -1,13 +1,15 @@
 """Command-line front end.
 
-    pycdcl FILE.cnf [--stats] [--max-conflicts N] [--assume LITS]
+    pycdcl FILE.cnf [--stats] [--max-conflicts N] [--assume LITS] [--proof OUT]
                                                      solve a DIMACS file ('-' = stdin)
+    pycdcl check FILE.cnf PROOF                      verify a DRUP proof of UNSAT
     pycdcl mus FILE.cnf [--no-minimize]              print a minimal unsatisfiable subset
     pycdcl sudoku GRID                               solve an 81-char sudoku
     pycdcl queens N                                  place N queens
 
 Exit codes follow the SAT competition convention: 10 SAT, 20 UNSAT,
-0 unknown (conflict budget exhausted), 1 usage or input error.
+0 unknown (conflict budget exhausted), 1 usage or input error. ``check``
+exits 0 when the proof is verified and 1 otherwise.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import time
 
 from . import __version__
 from .dimacs import DimacsError, dumps, parse
+from .drat import check_proof
 from .encode import n_queens, sudoku
 from .mus import unsat_core
 from .solver import Solver, check_model
@@ -78,6 +81,23 @@ def _mus(args: argparse.Namespace, out) -> int:
     return EXIT_UNSAT
 
 
+def _check(args: argparse.Namespace, out) -> int:
+    try:
+        _, clauses = _read_cnf(args.file)
+        with open(args.proof, encoding="utf-8") as fp:
+            proof = fp.read()
+    except (OSError, DimacsError) as exc:
+        print(f"c error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    t0 = time.perf_counter()
+    result = check_proof(clauses, proof)
+    elapsed = time.perf_counter() - t0
+    print(f"c lemmas {result.lemmas} deletions {result.deletions} time {elapsed:.3f}s", file=out)
+    print(f"c {result.message}", file=out)
+    print("s VERIFIED" if result.verified else "s NOT VERIFIED", file=out)
+    return 0 if result.verified else 1
+
+
 def _solve_file(args: argparse.Namespace, out) -> int:
     try:
         assumptions = _parse_assumptions(args.assume)
@@ -89,8 +109,23 @@ def _solve_file(args: argparse.Namespace, out) -> int:
     except (OSError, DimacsError) as exc:
         print(f"c error: {exc}", file=sys.stderr)
         return EXIT_ERROR
+    proof = None
+    if args.proof:
+        try:
+            proof = open(args.proof, "w", encoding="utf-8")
+        except OSError as exc:
+            print(f"c error: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+    try:
+        return _run_solver(args, out, num_vars, clauses, assumptions, proof)
+    finally:
+        if proof is not None:
+            proof.close()
+
+
+def _run_solver(args, out, num_vars, clauses, assumptions, proof) -> int:
     t0 = time.perf_counter()
-    s = Solver()
+    s = Solver(proof=proof)
     while s.num_vars < num_vars:
         s.new_var()
     s.add_clauses(clauses)
@@ -158,6 +193,12 @@ def main(argv: list[str] | None = None, out=None) -> int:
         p.add_argument("--no-minimize", action="store_true",
                        help="stop at the first core instead of shrinking it to a MUS")
         return _mus(p.parse_args(argv[1:]), out)
+    if argv and argv[0] == "check":
+        p = argparse.ArgumentParser(prog="pycdcl check",
+                                    description="Verify a DRUP proof that a CNF is unsatisfiable.")
+        p.add_argument("file", help="DIMACS CNF file, or '-' for stdin")
+        p.add_argument("proof", help="proof file, e.g. from 'pycdcl FILE --proof OUT'")
+        return _check(p.parse_args(argv[1:]), out)
     if argv and argv[0] in ("sudoku", "queens"):
         p = argparse.ArgumentParser(prog=f"pycdcl {argv[0]}")
         if argv[0] == "sudoku":
@@ -167,7 +208,7 @@ def main(argv: list[str] | None = None, out=None) -> int:
         return _queens(p.parse_args(argv[1:]), out)
 
     p = argparse.ArgumentParser(prog="pycdcl", description="CDCL SAT solver for DIMACS CNF files.",
-                                epilog="subcommands: 'pycdcl mus FILE', 'pycdcl sudoku GRID', 'pycdcl queens N'")
+                                epilog="subcommands: 'pycdcl check FILE PROOF', 'pycdcl mus FILE', 'pycdcl sudoku GRID', 'pycdcl queens N'")
     p.add_argument("file", help="DIMACS CNF file, or '-' for stdin")
     p.add_argument("--stats", action="store_true", help="print search statistics as comments")
     p.add_argument("-q", "--quiet", action="store_true", help="omit the model ('v' lines)")
@@ -176,6 +217,8 @@ def main(argv: list[str] | None = None, out=None) -> int:
     p.add_argument("--assume", metavar="LITS", default=None,
                    help="solve under assumption literals, e.g. '1 -3' or '1,-3'; "
                         "on UNSAT prints the failed ones as 'c core ...'")
+    p.add_argument("--proof", metavar="OUT", default=None,
+                   help="write a DRUP proof to OUT (check it with 'pycdcl check')")
     p.add_argument("--version", action="version", version=f"pycdcl {__version__}")
     return _solve_file(p.parse_args(argv), out)
 

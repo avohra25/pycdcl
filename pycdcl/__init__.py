@@ -5,4 +5,4 @@ from .solver import Solver, check_model, luby, solve
 
 __all__ = ["Solver", "solve", "check_model", "luby",
            "parse", "load", "dumps", "DimacsError"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

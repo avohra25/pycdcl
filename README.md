@@ -4,7 +4,8 @@ A small, readable **conflict-driven clause learning (CDCL) SAT solver** in pure
 Python, with zero dependencies. It implements the core ideas behind MiniSat in
 about 500 lines you can read in one sitting, plus the tooling to actually use
 it: a DIMACS reader/writer, cardinality-constraint encoders, puzzle encoders,
-model enumeration and a SAT-competition-style command-line solver.
+model enumeration, unsatisfiable cores, checkable proofs of
+unsatisfiability and a SAT-competition-style command-line solver.
 
 ```
 $ python -m pycdcl examples/small.cnf
@@ -37,6 +38,9 @@ s UNSATISFIABLE
 - **Minimal unsatisfiable subsets (MUS)**: `pycdcl.mus.unsat_core` shrinks
   an unsatisfiable formula to a set of clauses where every clause matters,
   using selector variables, deletion-based minimisation and core refinement.
+- **Proofs of unsatisfiability**: `Solver(proof=f)` writes a DRUP proof
+  (every learnt clause and deletion), and `pycdcl.drat.check_proof` /
+  `pycdcl check` verify it independently of the solver.
 - **Conflict budgets** (`max_conflicts`) that return "unknown" instead of
   running forever.
 - **Encoders**: at-most-one, at-most/at-least/exactly-k (Sinz sequential
@@ -77,6 +81,21 @@ s.add_clause([-3])              # incremental: learnt clauses are kept
 s.solve()                       # False
 ```
 
+An UNSAT answer can come with a proof that a separate checker replays:
+
+```python
+import io
+from pycdcl import Solver
+from pycdcl.drat import check_proof
+
+clauses = [[1, 2], [-1, 2], [1, -2], [-1, -2]]
+proof = io.StringIO()
+s = Solver(proof=proof)
+s.add_clauses(clauses)
+s.solve()                                     # False
+check_proof(clauses, proof.getvalue())        # CheckResult(verified=True, ...)
+```
+
 Encoders build plain clause lists you can hand to any solver:
 
 ```python
@@ -101,7 +120,9 @@ graph_coloring([(1, 2), (2, 3), (3, 1)], 2)   # None: a triangle needs 3 colours
 ## Command line
 
 ```
-pycdcl FILE.cnf [--stats] [-q] [--max-conflicts N] [--assume LITS]   # '-' reads stdin
+pycdcl FILE.cnf [--stats] [-q] [--max-conflicts N] [--assume LITS] [--proof OUT]
+                                                      # '-' reads stdin
+pycdcl check FILE.cnf PROOF                           # verify a DRUP proof
 pycdcl mus FILE.cnf [--no-minimize]                   # print a MUS as DIMACS
 pycdcl sudoku GRID                                    # 81 chars, '.' or '0' blank
 pycdcl queens N
@@ -119,6 +140,20 @@ empty `c core` means the formula is unsatisfiable without any of them):
 $ python -m pycdcl --assume "1 3" examples/small.cnf
 s UNSATISFIABLE
 c core 1 3
+```
+
+`--proof OUT` writes a DRUP proof alongside the answer, and `pycdcl check`
+verifies it (exit code 0 when verified, 1 otherwise). The proof is written in
+the standard text DRAT format used in SAT competitions, so it can also be
+fed to external checkers such as drat-trim:
+
+```
+$ python -m pycdcl -q --proof php.drup examples/php-7-6.cnf
+s UNSATISFIABLE
+$ python -m pycdcl check examples/php-7-6.cnf php.drup
+c lemmas 870 deletions 742 time 0.035s
+c empty clause derived at line 1612
+s VERIFIED
 ```
 
 `pycdcl mus` explains *why* a formula is unsatisfiable by printing a minimal
@@ -173,6 +208,20 @@ assumption decisions it reaches (MiniSat's `analyzeFinal`). The result is a
 core: a subset of the assumptions that is already inconsistent with the
 formula. It is not guaranteed to be minimal.
 
+**Proofs.** Every clause the solver learns follows from the input and earlier
+learnt clauses by *reverse unit propagation* (RUP): assume all its literals
+false, unit-propagate, and a conflict appears. So the solver only has to log
+each learnt clause as it is added (`1 -3 0`), each deleted clause as it is
+dropped (`d 1 -3 0`), and the empty clause at the final level-0 conflict. The
+checker in `pycdcl/drat.py` shares no code with the solver: it keeps its own
+two-watched-literal clause database and, for each lemma, re-runs unit
+propagation from the input's unit clauses plus the negated lemma, so a bug in
+the solver's search or learning shows up as a rejected lemma rather than a
+wrong answer. Only RUP lemmas are supported (no RAT), which covers everything
+a CDCL solver without preprocessing produces. A proof certifies that the
+formula itself is unsatisfiable; a failed solve under assumptions, or clauses
+added after the input, are not covered.
+
 **MUS extraction** builds on that. Each clause `C_i` gets a selector variable
 `s_i` and is added as `C_i | ~s_i`, so assuming `s_i` switches the clause on.
 Solving with every selector assumed gives a first core. The deletion loop then
@@ -224,8 +273,10 @@ The suite cross-checks the solver against brute force on over two thousand rando
 small formulas (with and without assumptions, and with clauses added
 incrementally), checks every model it returns, verifies the cardinality
 encoders by counting models for every `n <= 7` and `k`, checks assumption
-cores and MUS results against brute force on random formulas, and exercises
-the CLI end to end.
+cores and MUS results against brute force on random formulas, verifies the
+solver's proofs for every unsatisfiable test formula (including runs with
+heavy learnt clause deletion) while rejecting tampered and truncated ones,
+and exercises the CLI end to end.
 
 ## Layout
 
@@ -236,6 +287,7 @@ pycdcl/dimacs.py   DIMACS parsing and writing
 pycdcl/encode.py   cardinality constraints and puzzle encoders
 pycdcl/models.py   model enumeration and counting
 pycdcl/mus.py      unsatisfiable cores and MUS extraction
+pycdcl/drat.py     DRUP proof checker
 pycdcl/cli.py      command-line front end
 benchmarks/        benchmark script
 examples/          sample CNF files

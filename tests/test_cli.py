@@ -73,6 +73,25 @@ class CliTests(unittest.TestCase):
     def test_mus_bad_file(self):
         self.assertEqual(run(["mus", "/nonexistent.cnf"])[0], 1)
 
+    def test_proof_round_trip(self):
+        cnf = self.write("p cnf 2 4\n1 2 0\n-1 2 0\n1 -2 0\n-1 -2 0\n")
+        proof = cnf + ".drup"
+        self.addCleanup(lambda: os.path.exists(proof) and os.remove(proof))
+        code, out = run(["--proof", proof, cnf])
+        self.assertEqual(code, 20)
+        code, out = run(["check", cnf, proof])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines()[-1], "s VERIFIED")
+
+    def test_check_rejects_bad_proof(self):
+        cnf = self.write("p cnf 3 3\n1 2 3 0\n-1 2 0\n-2 3 0\n")
+        proof = self.write("-3 0\n0\n")
+        code, out = run(["check", cnf, proof])
+        self.assertEqual(code, 1)
+        self.assertIn("s NOT VERIFIED", out)
+        self.assertIn("c line 1: lemma -3 0 is not implied by unit propagation", out)
+        self.assertEqual(run(["check", cnf, "/nonexistent.drup"])[0], 1)
+
     def test_unknown_on_budget(self):
         clauses = []
         var = lambda p, h: p * 7 + h + 1  # noqa: E731

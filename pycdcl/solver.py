@@ -10,12 +10,13 @@ local (one-step) learnt clause minimisation, non-chronological
 backjumping, VSIDS branching with an indexed heap, phase saving, Luby
 restarts and activity-based learnt clause deletion. When a solve fails
 under assumptions, final conflict analysis reports which assumptions were
-responsible (``Solver.core``).
+responsible (``Solver.core``). With ``proof=`` set, the solver writes a
+DRUP proof (learnt clauses and deletions) that ``pycdcl.drat`` can check.
 """
 
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+from typing import Iterable, Sequence, TextIO
 
 from ._heap import VarHeap
 
@@ -90,7 +91,7 @@ class Solver:
     def __init__(self, *, var_decay: float = 0.95, clause_decay: float = 0.999,
                  restart_first: int = 100, restart_inc: float = 2.0,
                  learnt_ratio: float = 1 / 3, learnt_growth: float = 1.1,
-                 min_learnts: int = 100) -> None:
+                 min_learnts: int = 100, proof: TextIO | None = None) -> None:
         self.var_decay = var_decay
         self.clause_decay = clause_decay
         self.restart_first = restart_first
@@ -121,6 +122,10 @@ class Solver:
         self.core: list[int] | None = None
         self._final_core: list[int] = []
         self.stats = Stats()
+        # DRUP proof output: every learnt clause is a reverse-unit-propagation
+        # consequence of the input plus earlier lemmas, so a checker can
+        # replay the refutation without trusting the solver.
+        self.proof = proof
 
     # ------------------------------------------------------------------ setup
 
@@ -170,10 +175,13 @@ class Solver:
             out.append(lit)
         if not out:
             self.ok = False
+            self._log_empty()
             return False
         if len(out) == 1:
             self._enqueue(out[0], None)
             self.ok = self._propagate() is None
+            if not self.ok:
+                self._log_empty()
             return self.ok
         c = Clause(out)
         self.clauses.append(c)
@@ -199,6 +207,14 @@ class Solver:
         return self.core is not None and lit in self.core
 
     # ------------------------------------------------------------ internals
+
+    def _log(self, lits: Sequence[int], delete: bool = False) -> None:
+        line = " ".join(str(_to_dimacs(l)) for l in lits)
+        self.proof.write(("d " if delete else "") + (line + " 0\n" if line else "0\n"))
+
+    def _log_empty(self) -> None:
+        if self.proof is not None:
+            self.proof.write("0\n")
 
     def _attach(self, c: Clause) -> None:
         self.watches[c.lits[0]].append(c)
@@ -412,9 +428,12 @@ class Solver:
         limit = self.cla_inc / max(len(learnts), 1)
         half = len(learnts) // 2
         keep = []
+        proof = self.proof
         for i, c in enumerate(learnts):
             if len(c.lits) > 2 and not self._locked(c) and (i < half or c.activity < limit):
                 c.deleted = True
+                if proof is not None:
+                    self._log(c.lits, delete=True)
             else:
                 keep.append(c)
         self.learnts = keep
@@ -432,10 +451,13 @@ class Solver:
                 conflicts += 1
                 if not self.trail_lim:
                     self.ok = False
+                    self._log_empty()
                     return False
                 learnt, bt = self._analyze(confl)
                 self._cancel_until(bt)
                 stats.learnt_literals += len(learnt)
+                if self.proof is not None:
+                    self._log(learnt)
                 if len(learnt) == 1:
                     self._enqueue(learnt[0], None)
                 else:
