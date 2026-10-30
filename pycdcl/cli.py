@@ -2,6 +2,7 @@
 
     pycdcl FILE.cnf [--stats] [--max-conflicts N] [--assume LITS]
                                                      solve a DIMACS file ('-' = stdin)
+    pycdcl mus FILE.cnf [--no-minimize]              print a minimal unsatisfiable subset
     pycdcl sudoku GRID                               solve an 81-char sudoku
     pycdcl queens N                                  place N queens
 
@@ -16,8 +17,9 @@ import sys
 import time
 
 from . import __version__
-from .dimacs import DimacsError, parse
+from .dimacs import DimacsError, dumps, parse
 from .encode import n_queens, sudoku
+from .mus import unsat_core
 from .solver import Solver, check_model
 
 EXIT_SAT, EXIT_UNSAT, EXIT_UNKNOWN, EXIT_ERROR = 10, 20, 0, 1
@@ -49,6 +51,33 @@ def _parse_assumptions(text: str | None) -> list[int]:
     return lits
 
 
+def _read_cnf(path: str) -> tuple[int, list[list[int]]]:
+    if path == "-":
+        return parse(sys.stdin.read())
+    with open(path, encoding="utf-8") as fp:
+        return parse(fp.read())
+
+
+def _mus(args: argparse.Namespace, out) -> int:
+    try:
+        num_vars, clauses = _read_cnf(args.file)
+    except (OSError, DimacsError) as exc:
+        print(f"c error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    t0 = time.perf_counter()
+    core = unsat_core(clauses, minimal=not args.no_minimize)
+    elapsed = time.perf_counter() - t0
+    if core is None:
+        print("s SATISFIABLE", file=out)
+        return EXIT_SAT
+    kind = "core" if args.no_minimize else "minimal unsatisfiable subset"
+    comments = [f"{kind}: {len(core)} of {len(clauses)} clauses, {elapsed:.3f}s",
+                "original clause numbers (1-based): " + " ".join(str(i + 1) for i in core)]
+    print("s UNSATISFIABLE", file=out)
+    out.write(dumps([clauses[i] for i in core], num_vars, comments))
+    return EXIT_UNSAT
+
+
 def _solve_file(args: argparse.Namespace, out) -> int:
     try:
         assumptions = _parse_assumptions(args.assume)
@@ -56,12 +85,7 @@ def _solve_file(args: argparse.Namespace, out) -> int:
         print(f"c error: {exc}", file=sys.stderr)
         return EXIT_ERROR
     try:
-        if args.file == "-":
-            text = sys.stdin.read()
-        else:
-            with open(args.file, encoding="utf-8") as fp:
-                text = fp.read()
-        num_vars, clauses = parse(text)
+        num_vars, clauses = _read_cnf(args.file)
     except (OSError, DimacsError) as exc:
         print(f"c error: {exc}", file=sys.stderr)
         return EXIT_ERROR
@@ -127,6 +151,13 @@ def _queens(args: argparse.Namespace, out) -> int:
 def main(argv: list[str] | None = None, out=None) -> int:
     out = out or sys.stdout
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "mus":
+        p = argparse.ArgumentParser(prog="pycdcl mus",
+                                    description="Print a minimal unsatisfiable subset of a CNF as DIMACS.")
+        p.add_argument("file", help="DIMACS CNF file, or '-' for stdin")
+        p.add_argument("--no-minimize", action="store_true",
+                       help="stop at the first core instead of shrinking it to a MUS")
+        return _mus(p.parse_args(argv[1:]), out)
     if argv and argv[0] in ("sudoku", "queens"):
         p = argparse.ArgumentParser(prog=f"pycdcl {argv[0]}")
         if argv[0] == "sudoku":
@@ -136,7 +167,7 @@ def main(argv: list[str] | None = None, out=None) -> int:
         return _queens(p.parse_args(argv[1:]), out)
 
     p = argparse.ArgumentParser(prog="pycdcl", description="CDCL SAT solver for DIMACS CNF files.",
-                                epilog="subcommands: 'pycdcl sudoku GRID', 'pycdcl queens N'")
+                                epilog="subcommands: 'pycdcl mus FILE', 'pycdcl sudoku GRID', 'pycdcl queens N'")
     p.add_argument("file", help="DIMACS CNF file, or '-' for stdin")
     p.add_argument("--stats", action="store_true", help="print search statistics as comments")
     p.add_argument("-q", "--quiet", action="store_true", help="omit the model ('v' lines)")

@@ -56,6 +56,23 @@ class CliTests(unittest.TestCase):
         self.assertEqual(run(["--assume", "1 x", path])[0], 1)
         self.assertEqual(run(["--assume", "0", path])[0], 1)
 
+    def test_mus_subcommand(self):
+        path = self.write("p cnf 4 5\n1 2 0\n-1 0\n3 0\n-2 0\n3 4 0\n")
+        code, out = run(["mus", path])
+        self.assertEqual(code, 20)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "s UNSATISFIABLE")
+        self.assertIn("c original clause numbers (1-based): 1 2 4", lines)
+        self.assertEqual(lines[-3:], ["1 2 0", "-1 0", "-2 0"])
+        self.assertIn("p cnf 4 3", lines)
+
+    def test_mus_on_sat_formula(self):
+        code, out = run(["mus", self.write("p cnf 2 1\n1 2 0\n")])
+        self.assertEqual((code, out), (10, "s SATISFIABLE\n"))
+
+    def test_mus_bad_file(self):
+        self.assertEqual(run(["mus", "/nonexistent.cnf"])[0], 1)
+
     def test_unknown_on_budget(self):
         clauses = []
         var = lambda p, h: p * 7 + h + 1  # noqa: E731

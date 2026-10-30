@@ -34,6 +34,9 @@ s UNSATISFIABLE
 - **Unsatisfiable cores over assumptions**: after a failed solve,
   `Solver.core` names the assumptions that are jointly to blame, found by
   final conflict analysis.
+- **Minimal unsatisfiable subsets (MUS)**: `pycdcl.mus.unsat_core` shrinks
+  an unsatisfiable formula to a set of clauses where every clause matters,
+  using selector variables, deletion-based minimisation and core refinement.
 - **Conflict budgets** (`max_conflicts`) that return "unknown" instead of
   running forever.
 - **Encoders**: at-most-one, at-most/at-least/exactly-k (Sinz sequential
@@ -85,6 +88,11 @@ xs = cnf.new_vars(6)
 cnf.exactly_k(xs, 2)            # sequential counter, adds auxiliary variables
 count_models(cnf.clauses, project=xs)   # 15 == C(6, 2)
 
+from pycdcl.mus import unsat_core, is_mus
+
+unsat_core([[1, 2], [-1], [3], [-2], [3, 4]])   # [0, 1, 3]: indices of a MUS
+unsat_core([[3], [1], [4]], hard=[[-1]])         # [1]: hard clauses are never reported
+
 sudoku("53..7....6..195....98....6.8...6...34..8.3..17...2...6.6....28....419..5....8..79")
 n_queens(8)                     # [1, 3, 5, 7, 2, 0, 6, 4]: queen's column in each row
 graph_coloring([(1, 2), (2, 3), (3, 1)], 2)   # None: a triangle needs 3 colours
@@ -94,6 +102,7 @@ graph_coloring([(1, 2), (2, 3), (3, 1)], 2)   # None: a triangle needs 3 colours
 
 ```
 pycdcl FILE.cnf [--stats] [-q] [--max-conflicts N] [--assume LITS]   # '-' reads stdin
+pycdcl mus FILE.cnf [--no-minimize]                   # print a MUS as DIMACS
 pycdcl sudoku GRID                                    # 81 chars, '.' or '0' blank
 pycdcl queens N
 ```
@@ -110,6 +119,21 @@ empty `c core` means the formula is unsatisfiable without any of them):
 $ python -m pycdcl --assume "1 3" examples/small.cnf
 s UNSATISFIABLE
 c core 1 3
+```
+
+`pycdcl mus` explains *why* a formula is unsatisfiable by printing a minimal
+unsatisfiable subset of its clauses as a DIMACS file, with the original clause
+numbers in a comment (`--no-minimize` stops at the first core found):
+
+```
+$ printf 'p cnf 4 5\n1 2 0\n-1 0\n3 0\n-2 0\n3 4 0\n' | python -m pycdcl mus -
+s UNSATISFIABLE
+c minimal unsatisfiable subset: 3 of 5 clauses, 0.000s
+c original clause numbers (1-based): 1 2 4
+p cnf 4 3
+1 2 0
+-1 0
+-2 0
 ```
 
 ## How it works
@@ -148,6 +172,14 @@ from the falsified assumption, following reason clauses, and collects the
 assumption decisions it reaches (MiniSat's `analyzeFinal`). The result is a
 core: a subset of the assumptions that is already inconsistent with the
 formula. It is not guaranteed to be minimal.
+
+**MUS extraction** builds on that. Each clause `C_i` gets a selector variable
+`s_i` and is added as `C_i | ~s_i`, so assuming `s_i` switches the clause on.
+Solving with every selector assumed gives a first core. The deletion loop then
+tries each remaining clause in turn: if the formula stays unsatisfiable
+without it, the clause is dropped, and the new core usually drops several
+others at once; if the formula becomes satisfiable, the clause is critical and
+stays. All probes run on one incremental solver, so learnt clauses carry over.
 
 ## Benchmarks
 
@@ -191,8 +223,9 @@ python -m unittest discover -s tests
 The suite cross-checks the solver against brute force on over two thousand random
 small formulas (with and without assumptions, and with clauses added
 incrementally), checks every model it returns, verifies the cardinality
-encoders by counting models for every `n <= 7` and `k`, and exercises the CLI
-end to end.
+encoders by counting models for every `n <= 7` and `k`, checks assumption
+cores and MUS results against brute force on random formulas, and exercises
+the CLI end to end.
 
 ## Layout
 
@@ -202,6 +235,7 @@ pycdcl/_heap.py    indexed max-heap for VSIDS
 pycdcl/dimacs.py   DIMACS parsing and writing
 pycdcl/encode.py   cardinality constraints and puzzle encoders
 pycdcl/models.py   model enumeration and counting
+pycdcl/mus.py      unsatisfiable cores and MUS extraction
 pycdcl/cli.py      command-line front end
 benchmarks/        benchmark script
 examples/          sample CNF files
